@@ -1,0 +1,112 @@
+#version 300 es
+precision highp float;
+precision highp int;
+
+uniform sampler2D Frame;
+uniform vec2 texcoordOffset;
+
+uniform struct inputdata
+{
+   vec2 video_size;
+   vec2 texture_size;
+   vec2 output_size;
+   float frame_count;
+   float frame_direction;
+   float frame_rotation;
+}IN;
+
+smooth centroid in vec2 v_texCoord;
+out vec4 gl_FragColor;
+const mat3 RGBtoYIQ = mat3(0.299, 0.596, 0.212, 
+                           0.587,-0.275,-0.523, 
+                           0.114,-0.321, 0.311);
+
+const mat3 YIQtoRGB = mat3(1.0, 1.0, 1.0,
+                           0.95568806036115671171,-0.27158179694405859326,-1.1081773266826619523,
+                           0.61985809445637075388,-0.64687381613840131330, 1.7050645599191817149);
+
+const vec3 val00 = vec3( 1.2, 1.2, 1.2);
+//texcoordOffset.x==(1.0/2340.0)
+//texcoordOffset.x==(1.0/6553.0)
+//IN.texture_size.x<=(2048.0)
+//IN.texture_size.y<=(1024.0)
+void main() {
+
+  // The parameters are hardcoded for now, but could be
+  // made into uniforms to control fromt he program.
+  float FXAA_SPAN_MAX = 8.0;
+  float FXAA_REDUCE_MUL = 1.0/8.0;
+  //max luma is 255
+  float FXAA_LUMA_REDUCE_MIN = (1.0/128.0);
+
+  
+  vec3 rgbW = texture(Frame, v_texCoord.xy + (vec2(-1.0, 0.0)/IN.texture_size)).xyz;
+  vec3 rgbN = texture(Frame, v_texCoord.xy + (vec2(0.0, -1.0)/IN.texture_size)).xyz;
+  vec3 rgbS = texture(Frame, v_texCoord.xy + (vec2(0.0, +1.0)/IN.texture_size)).xyz;
+  vec3 rgbE = texture(Frame, v_texCoord.xy + (vec2(+1.0, 0.0)/IN.texture_size)).xyz;
+  vec3 rgbNW = texture(Frame, v_texCoord.xy + (vec2(-1.0, -1.0)/IN.texture_size)).xyz;
+  vec3 rgbNE = texture(Frame, v_texCoord.xy + (vec2(+1.0, -1.0)/IN.texture_size)).xyz;
+  vec3 rgbSW = texture(Frame, v_texCoord.xy + (vec2(-1.0, +1.0)/IN.texture_size)).xyz;
+  vec3 rgbSE = texture(Frame, v_texCoord.xy + (vec2(+1.0, +1.0)/IN.texture_size)).xyz;
+  vec3 rgbM  = texture(Frame, v_texCoord.xy).xyz;
+	// rgbM = mix(mix(mix(mix(rgbNW,rgbNE,0.5),mix(rgbSW,rgbSE,0.5),0.5),mix(mix(rgbW,rgbE,0.5),mix(rgbS,rgbN,0.5),0.5),0.5),rgbM,0.5);
+// gl_FragColor.xyz=rgbM;
+  vec3 luma = vec3(0.299, 0.587, 0.114);
+  float lumaNW = dot(rgbNW, luma);
+  float lumaNE = dot(rgbNE, luma)+1.0/384.0;
+  float lumaSW = dot(rgbSW, luma);
+  float lumaSE = dot(rgbSE, luma);
+  float lumaN = dot(rgbN, luma);
+  float lumaE = dot(rgbE, luma);
+  float lumaW = dot(rgbW, luma);
+  float lumaS = dot(rgbS, luma);
+  float lumaM  = dot(rgbM,  luma);
+	
+  float lumaAroundMin = min(min(lumaNW, lumaNE), min(lumaSW, lumaSE));
+  float lumaAroundMax = max(max(lumaNW, lumaNE), max(lumaSW, lumaSE));
+
+  float lumaMin = min(lumaM,lumaAroundMin);
+  float lumaMax = max(lumaM,lumaAroundMax);
+  float contrast =lumaMax-lumaMin;
+  float thresholdRate = 0.10;
+  float minThreshold = 10.0;
+  vec3 rgbC = (rgbN+rgbE+rgbNE)*1.0/3.0*0.55+rgbM*0.45;
+  if (contrast < max(minThreshold, lumaMax*thresholdRate)){
+    gl_FragColor.xyz= rgbC;
+    gl_FragColor.a = 1.0;
+    return;
+  }
+
+  //The gradient direction, which is perpendicular to the edge
+
+  float shapness = max((lumaNW + lumaNE + lumaSW + lumaSE) * (0.25 * FXAA_REDUCE_MUL), FXAA_LUMA_REDUCE_MIN);
+
+  vec2 dir = vec2(-((lumaNW+lumaNE)-(lumaSW+lumaSE)),(lumaNW+lumaSW)-(lumaNE+lumaSE));
+
+  vec2 dir_v=normalize(vec2(1,-dir.x/dir.y));
+  float scale= 1.0 / ( min(abs(dir.x) ,abs(dir.y))*1.0);
+  dir*=scale;
+  dir.x=clamp(dir.x,-4.0,4.0);
+  dir.y=clamp(dir.y,-4.0,4.0);
+
+  vec3 rgbT = (1.0/2.0) * (
+              texture(Frame, v_texCoord.xy + dir_v).xyz +
+              texture(Frame, v_texCoord.xy - dir_v).xyz );
+  vec3 rgbA = (1.0/2.0) * (
+              texture(Frame, v_texCoord.xy + dir * (1.0/3.0 - 0.5)).xyz +
+              texture(Frame, v_texCoord.xy + dir * (2.0/3.0 - 0.5)).xyz);
+  vec3 rgbB = rgbA * (1.0/2.0) + (1.0/4.0) * (
+              texture(Frame, v_texCoord.xy + dir * (0.0/3.0 - 0.5)).xyz +
+              texture(Frame, v_texCoord.xy + dir * (3.0/3.0 - 0.5)).xyz);
+
+  float lumaB = dot(rgbB, luma);
+  float lumaA = dot(rgbA, luma);
+// mix(rgbB,rgbC,0.8)
+  rgbM=( lumaB > lumaMax || lumaB < lumaMin)?mix(rgbA,rgbT,0.5):mix(rgbB,rgbT,0.5);
+
+  // rgbM *= RGBtoYIQ;
+  // rgbM=YIQtoRGB*vec3(pow(rgbM.x,val00.x),rgbM.yz*val00.yz);
+  gl_FragColor.xyz=rgbM;
+  gl_FragColor.a=1.0;
+
+}
